@@ -43,7 +43,7 @@ def main():
         mutation_rate=0.05,
         mutation_strength=0.1,
         games_per_agent=100,
-        workers=8
+        workers=10
     )
 
     best_agent, best_average = evolution.run(

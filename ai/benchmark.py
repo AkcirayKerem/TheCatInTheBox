@@ -8,7 +8,7 @@ from concurrent.futures import ProcessPoolExecutor
 from config import BOX_COUNT
 from game.agent import Agent
 from ai.baseline_agent import BaselineAgent
-from ai.evaluation import evaluate_agent, evaluate_agent_worker
+from ai.evaluation import evaluate_agent, evaluate_agent_worker, evaluate_genome_worker
 
 
 def benchmark_inference():
@@ -60,7 +60,7 @@ def benchmark_baseline():
 
 
 def benchmark_evaluation():
-    print("\n========== REALISTIC POPULATION SCALING ==========")
+    print("\n========== REALISTIC POPULATION SCALING (GENOME-BASED) ==========")
 
     population_size = 100
     games_per_agent = 10
@@ -71,12 +71,14 @@ def benchmark_evaluation():
         for _ in range(population_size)
     ]
 
+    # Pack raw genomes instead of heavy Agent objects
     tasks = [
-        (agent, games_per_agent, seed_offset)
+        (agent.network.get_genome(), "circular", games_per_agent, seed_offset)
         for agent in agents
     ]
 
-    worker_counts = [1, 2, 4, 6, 8, 10, 12]
+    # Test up to your physical core count limit (e.g., 8 workers)
+    worker_counts = [1, 2, 4, 6, 8]
 
     measurements = {}
 
@@ -91,7 +93,7 @@ def benchmark_evaluation():
         ) as executor:
 
             results = list(
-                executor.map(evaluate_agent_worker, tasks)
+                executor.map(evaluate_genome_worker, tasks)
             )
 
         elapsed = time.perf_counter() - start
@@ -112,7 +114,6 @@ def benchmark_evaluation():
             f"{elapsed:.3f}s | "
             f"Speedup: {baseline_time / elapsed:.2f}x"
         )
-
 
 if __name__ == "__main__":
     benchmark_evaluation()

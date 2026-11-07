@@ -1,4 +1,5 @@
 from config import MAX_TURNS_PER_GAME
+from game.agent import Agent
 from game.game import Game
 def play_game(agent, seed=None):
 
@@ -21,6 +22,21 @@ def play_game(agent, seed=None):
         agent.update(guess)
 
     return game.turns
+
+
+def evaluate_genome_worker(args):
+    genome, network_type, games, seed_offset = args
+
+
+    # Instantiate the agent locally inside the worker process using the raw genome
+    agent = Agent(network_type=network_type)
+    agent.network.set_genome(genome)
+
+    total_turns = 0
+    for seed in range(seed_offset, seed_offset + games):
+        total_turns += play_game(agent, seed)
+
+    return total_turns / games
 def evaluate_agent(agent, games=100, seed_offset=0):
 
     total_turns = 0

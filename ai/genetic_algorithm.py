@@ -1,7 +1,7 @@
 import random
 import numpy as np
 import os
-from ai.evaluation import validate_agent
+from ai.evaluation import validate_agent, evaluate_genome_worker
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from ai.baseline_agent import BaselineAgent
 from game.agent import Agent
@@ -63,13 +63,15 @@ class GeneticAlgorithm:
             seed_offset,
             stage_name
     ):
+        # Pack raw genomes and network type instead of heavy Agent objects
         tasks = [
-            (agent, games, seed_offset)
+            (agent.network.get_genome(), self.network_type, games, seed_offset)
             for agent in agents
         ]
 
+        # Submit to the genome worker, mapping futures back to the original agents
         futures = {
-            executor.submit(evaluate_agent_worker, task): agent
+            executor.submit(evaluate_genome_worker, task): agent
             for agent, task in zip(agents, tasks)
         }
 
@@ -89,7 +91,6 @@ class GeneticAlgorithm:
             results.append((average, agent))
             completed += 1
 
-            # Only print every 5 agents or when complete to prevent I/O lag
             if completed % 5 == 0 or completed == len(agents):
                 print(
                     f"\rAgents evaluated: {completed}/{len(agents)} "
@@ -97,6 +98,7 @@ class GeneticAlgorithm:
                     end="",
                     flush=True
                 )
+
         print("\nEvaluation complete!", flush=True)
 
         results.sort(key=lambda x: x[0])
@@ -109,7 +111,7 @@ class GeneticAlgorithm:
         second_games = 50
         final_games = 75
 
-        first_survivors = 50    
+        first_survivors = 50
         final_survivors = 25
         # ==========================================
         # STAGE 1: Evaluate the entire population
