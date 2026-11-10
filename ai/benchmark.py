@@ -1,121 +1,94 @@
-
-import os
 import time
-import numpy as np
-
+import os
 from concurrent.futures import ProcessPoolExecutor
+from multiprocessing import shared_memory
+import numpy as np
 
 from config import BOX_COUNT
 from game.agent import Agent
-from ai.baseline_agent import BaselineAgent
-from ai.evaluation import evaluate_agent, evaluate_agent_worker, evaluate_genome_worker
+from ai.evaluation import evaluate_agent_batched
+from ai.circular_neural_network import _numba_conv_forward
+from game.batch_game import _numba_step_kernel
 
 
-def benchmark_inference():
-    print("\n========== NEURAL NETWORK INFERENCE ==========")
+def evaluate_shared_worker(args):
+    shm_name, shape, dtype, network_type, games, seed_offset, agent_idx = args
 
-    agent = Agent(network_type="circular")
-    probabilities = np.full(BOX_COUNT, 1 / BOX_COUNT)
+    existing_shm = shared_memory.SharedMemory(name=shm_name)
+    genomes = np.ndarray(shape, dtype=dtype, buffer=existing_shm.buf)
 
-    iterations = 10000
+    genome = genomes[agent_idx].copy()
+    existing_shm.close()
 
-    # Warm-up
-    for _ in range(100):
-        agent.network.forward(probabilities)
+    agent = Agent(network_type=network_type)
+    agent.network.set_genome(genome)
 
-    start = time.perf_counter()
-
-    for _ in range(iterations):
-        agent.network.forward(probabilities)
-
-    elapsed = time.perf_counter() - start
-
-    print(f"Iterations: {iterations}")
-    print(f"Total time: {elapsed:.4f}s")
-    print(f"Average: {elapsed / iterations * 1000:.6f} ms")
-    print(f"Throughput: {iterations / elapsed:.0f} inferences/s")
+    return evaluate_agent_batched(agent, games=games, seed_offset=seed_offset + agent_idx)
 
 
-def benchmark_baseline():
-    print("\n========== BASELINE SIMULATION ==========")
+def warm_up_numba():
+    dummy_input = np.zeros((1, 1, BOX_COUNT), dtype=np.float64)
+    dummy_weight = np.zeros((8, 1, 3), dtype=np.float64)
+    dummy_bias = np.zeros(8, dtype=np.float64)
+    dummy_indices = np.zeros((BOX_COUNT, 3), dtype=np.int64)
+    _numba_conv_forward(dummy_input, dummy_weight, dummy_bias, dummy_indices)
 
-    games = 1000
-
-    start = time.perf_counter()
-
-    average = evaluate_agent(
-        BaselineAgent(),
-        games=games,
-        seed_offset=300000
-    )
-
-    elapsed = time.perf_counter() - start
-
-    print(f"Games: {games}")
-    print(f"Average guesses: {average:.3f}")
-    print(f"Total time: {elapsed:.4f}s")
-    print(f"Time per game: {elapsed / games:.6f}s")
+    dummy_pos = np.zeros(10, dtype=np.int64)
+    dummy_probs = np.ones((10, BOX_COUNT), dtype=np.float64) / BOX_COUNT
+    dummy_turns = np.zeros(10, dtype=np.float64)
+    dummy_fin = np.zeros(10, dtype=np.bool_)
+    dummy_guesses = np.zeros(10, dtype=np.int64)
+    dummy_rng = np.ones(10, dtype=np.int64)
+    _numba_step_kernel(dummy_pos, dummy_probs, dummy_turns, dummy_fin, dummy_guesses, dummy_rng, None)
 
 
-
-
-def benchmark_evaluation():
-    print("\n========== REALISTIC POPULATION SCALING (GENOME-BASED) ==========")
+def benchmark_shared_memory_population():
+    print("\n========== STABLE SHARED MEMORY + NUMBA BENCHMARK ==========")
 
     population_size = 100
-    games_per_agent = 10
+    games_per_agent = 100
     seed_offset = 400000
+
+    print("[DEBUG] Warming up Numba JIT compiler...")
+    warm_up_numba()
 
     agents = [
         Agent(network_type="circular")
         for _ in range(population_size)
     ]
 
-    # Pack raw genomes instead of heavy Agent objects
+    genomes_list = [agent.network.get_genome() for agent in agents]
+    genomes_arr = np.array(genomes_list, dtype=np.float64)
+
+    shm = shared_memory.SharedMemory(create=True, size=genomes_arr.nbytes)
+    shared_genomes = np.ndarray(genomes_arr.shape, dtype=genomes_arr.dtype, buffer=shm.buf)
+    shared_genomes[:] = genomes_arr[:]
+
     tasks = [
-        (agent.network.get_genome(), "circular", games_per_agent, seed_offset)
-        for agent in agents
+        (shm.name, genomes_arr.shape, genomes_arr.dtype, "circular", games_per_agent, seed_offset, i)
+        for i in range(population_size)
     ]
 
-    # Test up to your physical core count limit (e.g., 8 workers)
-    worker_counts = [1, 2, 4, 6, 8]
+    workers = os.cpu_count()
+    print(f"Evaluating population of 100 agents using {workers} cores...")
 
-    measurements = {}
+    total_start = time.perf_counter()
 
-    for workers in worker_counts:
-
-        print(f"\nTesting {workers} worker(s)...")
-
-        start = time.perf_counter()
-
-        with ProcessPoolExecutor(
-            max_workers=workers
-        ) as executor:
-
+    try:
+        with ProcessPoolExecutor(max_workers=workers) as executor:
             results = list(
-                executor.map(evaluate_genome_worker, tasks)
-            )
+                executor.map(evaluate_shared_worker, tasks, chunksize=max(1, population_size // (workers * 4))))
+    finally:
+        shm.close()
+        shm.unlink()
 
-        elapsed = time.perf_counter() - start
+    total_elapsed = time.perf_counter() - total_start
 
-        measurements[workers] = elapsed
+    print(f"\n========== TIMING SUMMARY ==========")
+    print(f"Total time: {total_elapsed:.3f}s")
+    print(f"Results calculated: {len(results)}")
+    print(f"Best agent average score: {np.min(results):.3f}")
 
-        print(f"Time: {elapsed:.3f}s")
-        print(f"Results calculated: {len(results)}")
-
-    baseline_time = measurements[1]
-
-    print("\n========== FINAL COMPARISON ==========")
-
-    for workers, elapsed in measurements.items():
-
-        print(
-            f"{workers} workers: "
-            f"{elapsed:.3f}s | "
-            f"Speedup: {baseline_time / elapsed:.2f}x"
-        )
 
 if __name__ == "__main__":
-    benchmark_evaluation()
-
-
+    benchmark_shared_memory_population()

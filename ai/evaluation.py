@@ -1,63 +1,47 @@
+import numpy as np
 from config import MAX_TURNS_PER_GAME
+from game.batch_game import BatchGame
 from game.agent import Agent
-from game.game import Game
-def play_game(agent, seed=None):
-
-    game = Game(seed)
-    agent.reset(seed)
-
-    while not game.finished:
-
-        # Prevent an evaluation from running indefinitely
-        if game.turns >= MAX_TURNS_PER_GAME:
-            return MAX_TURNS_PER_GAME
-
-        guess = agent.choose_guess()
-
-        found = game.guess(guess)
-
-        if found:
-            return game.turns
-
-        agent.update(guess)
-
-    return game.turns
 
 
-def evaluate_genome_worker(args):
-    genome, network_type, games, seed_offset = args
+def evaluate_agent_batched(agent, games=100, seed_offset=0):
+    game = BatchGame(num_games=games, seed=seed_offset)
+
+    # Create a dedicated local RNG seeded with the offset
+    # to guarantee 100% reproducible tie-breaking across tournament runs.
+    eval_rng = np.random.default_rng(seed_offset + 888888)
+
+    while not game.all_finished:
+        inputs = game.probabilities
+        scores = agent.network.forward(inputs)
+
+        if scores.ndim > 1:
+            masked_scores = scores.copy()
+            masked_scores[game.probabilities == 0.0] = -1e9
+
+            # Add tiny reproducible noise to cleanly break ties
+            # without altering true neural network strategy preferences.
+            noise = eval_rng.uniform(0, 1e-5, size=masked_scores.shape)
+            guess_indices = np.argmax(masked_scores + noise, axis=1)
+        else:
+            guess_indices = np.argmax(scores)
+
+        game.step(guess_indices)
+
+    return game.get_results()
 
 
-    # Instantiate the agent locally inside the worker process using the raw genome
+def evaluate_shared_worker(args):
+    from multiprocessing import shared_memory
+    shm_name, shape, dtype, network_type, games, seed_offset, agent_idx = args
+
+    existing_shm = shared_memory.SharedMemory(name=shm_name)
+    genomes = np.ndarray(shape, dtype=dtype, buffer=existing_shm.buf)
+
+    genome = genomes[agent_idx].copy()
+    existing_shm.close()
+
     agent = Agent(network_type=network_type)
     agent.network.set_genome(genome)
 
-    total_turns = 0
-    for seed in range(seed_offset, seed_offset + games):
-        total_turns += play_game(agent, seed)
-
-    return total_turns / games
-def evaluate_agent(agent, games=100, seed_offset=0):
-
-    total_turns = 0
-
-    for seed in range(seed_offset, seed_offset + games):
-
-        total_turns += play_game(agent, seed)
-
-    return total_turns / games
-def evaluate_agent_worker(args):
-
-    agent, games, seed_offset = args
-
-    return evaluate_agent(
-        agent,
-        games=games,
-        seed_offset=seed_offset
-    )
-def validate_agent(agent, games=1000, seed_offset=100000):
-    return evaluate_agent(
-        agent,
-        games=games,
-        seed_offset=seed_offset
-    )
+    return evaluate_agent_batched(agent, games=games, seed_offset=seed_offset + agent_idx)

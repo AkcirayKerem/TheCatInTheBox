@@ -19,6 +19,47 @@ class Agent:
 
         self.reset()
 
+    def choose_guess_batch(self, probabilities, rng):
+        """
+        Selects guesses for a batch of probability distributions.
+        probabilities shape: (num_games, BOX_COUNT)
+        returns: array of guesses of shape (num_games,)
+        """
+        # Forward pass for the entire batch
+        scores = self.network.forward(probabilities)
+
+        # Mask impossible guesses
+        scores[probabilities == 0] = -np.inf
+
+        # Fully vectorized tie-breaking using tiny random noise
+        noise = rng.uniform(0, 1e-5, size=scores.shape)
+        guesses = np.argmax(scores + noise, axis=1)
+
+        return guesses
+
+    def update_batch(self, probabilities, guesses, miss_indices, rng):
+        """
+        Updates probabilities for a subset of games that missed their guess.
+        """
+        if len(miss_indices) == 0:
+            return probabilities
+
+        p_subset = probabilities[miss_indices]
+        m_guesses = guesses[miss_indices]
+
+        # 1. Zero out guessed box
+        p_subset[np.arange(len(miss_indices)), m_guesses] = 0.0
+
+        # 2. Renormalize remaining probabilities
+        row_sums = np.sum(p_subset, axis=1, keepdims=True)
+        row_sums[row_sums == 0] = 1.0
+        p_subset /= row_sums
+
+        # 3. Shift belief distributions to account for cat movement using np.roll
+        probabilities[miss_indices] = 0.5 * (
+                np.roll(p_subset, 1, axis=1) + np.roll(p_subset, -1, axis=1)
+        )
+        return probabilities
     def reset(self, seed=None):
 
         self.probabilities = np.full(
